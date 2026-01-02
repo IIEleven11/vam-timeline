@@ -20,6 +20,12 @@ namespace VamTimeline
         private static float _lastEnd = -1f;
         private static OffsetOperations.Snapshot _offsetSnapshot;
 
+        // Pattern selection state
+        private static bool _usePatternSelection;
+        private static int _lastPatternInterval = 2;
+        private static int _lastPatternOffset;
+        private static HashSet<float> _patternSelectedKeyframes = new HashSet<float>();
+
         public override string screenId => ScreenName;
 
         private JSONStorableFloat _startJSON;
@@ -29,6 +35,14 @@ namespace VamTimeline
         private JSONStorableStringChooser _offsetModeJSON;
         private UIDynamicButton _offsetControllerUI;
 
+        // Pattern selection UI
+        private JSONStorableBool _usePatternSelectionJSON;
+        private JSONStorableFloat _patternIntervalJSON;
+        private JSONStorableFloat _patternOffsetJSON;
+        private UIDynamicToggle _usePatternSelectionUI;
+        private UIDynamicSlider _patternIntervalUI;
+        private UIDynamicSlider _patternOffsetUI;
+
         public override void Init(IAtomPlugin plugin, object arg)
         {
             base.Init(plugin, arg);
@@ -36,6 +50,8 @@ namespace VamTimeline
             CreateChangeScreenButton("<b><</b> <i>Back</i>", MoreScreen.ScreenName);
 
             InitSelectionUI();
+
+            InitPatternSelectionUI();
 
             InitBulkClipboardUI();
 
@@ -122,6 +138,104 @@ namespace VamTimeline
             selectionUI.height = 100f;
         }
 
+        private void InitPatternSelectionUI()
+        {
+            prefabFactory.CreateSpacer();
+
+            _usePatternSelectionJSON = new JSONStorableBool("Use pattern selection", _usePatternSelection, val =>
+            {
+                _usePatternSelection = val;
+                UpdatePatternSelectionUIVisibility();
+                if (val)
+                    ApplyPatternSelection();
+                SelectionModified();
+            });
+            _usePatternSelectionUI = prefabFactory.CreateToggle(_usePatternSelectionJSON);
+
+            // Get max keyframes count from selected targets
+            var maxKeyframes = GetMaxKeyframeCount();
+
+            _patternIntervalJSON = new JSONStorableFloat("Select every N frames", _lastPatternInterval, val =>
+            {
+                _lastPatternInterval = Mathf.RoundToInt(val);
+                _patternIntervalJSON.valNoCallback = _lastPatternInterval;
+                if (_usePatternSelection)
+                    ApplyPatternSelection();
+                SelectionModified();
+            }, 2f, Mathf.Max(2f, maxKeyframes - 1), false);
+            _patternIntervalUI = prefabFactory.CreateSlider(_patternIntervalJSON);
+            _patternIntervalUI.slider.wholeNumbers = true;
+
+            _patternOffsetJSON = new JSONStorableFloat("Starting at keyframe", _lastPatternOffset, val =>
+            {
+                _lastPatternOffset = Mathf.RoundToInt(val);
+                _patternOffsetJSON.valNoCallback = _lastPatternOffset;
+                if (_usePatternSelection)
+                    ApplyPatternSelection();
+                SelectionModified();
+            }, 0f, Mathf.Max(0f, maxKeyframes - 1), false);
+            _patternOffsetUI = prefabFactory.CreateSlider(_patternOffsetJSON);
+            _patternOffsetUI.slider.wholeNumbers = true;
+
+            UpdatePatternSelectionUIVisibility();
+        }
+
+        private void UpdatePatternSelectionUIVisibility()
+        {
+            if (_patternIntervalUI != null)
+                _patternIntervalUI.slider.interactable = _usePatternSelection;
+            if (_patternOffsetUI != null)
+                _patternOffsetUI.slider.interactable = _usePatternSelection;
+        }
+
+        private int GetMaxKeyframeCount()
+        {
+            var maxKeyframes = 2;
+            foreach (var target in animationEditContext.GetAllOrSelectedTargets())
+            {
+                var keyframes = target.GetAllKeyframesTime();
+                if (keyframes.Length > maxKeyframes)
+                    maxKeyframes = keyframes.Length;
+            }
+            return maxKeyframes;
+        }
+
+        private void ApplyPatternSelection()
+        {
+            _patternSelectedKeyframes.Clear();
+
+            var interval = _lastPatternInterval;
+            var offset = _lastPatternOffset;
+
+            foreach (var target in animationEditContext.GetAllOrSelectedTargets())
+            {
+                var keyframes = target.GetAllKeyframesTime();
+                for (var i = offset; i < keyframes.Length; i += interval)
+                {
+                    _patternSelectedKeyframes.Add(keyframes[i]);
+                }
+            }
+        }
+
+        private bool IsKeyframeSelected(float keyTime)
+        {
+            if (_usePatternSelection)
+            {
+                // Check if this keyframe is in our pattern selection (with small epsilon for floating point comparison)
+                foreach (var selectedTime in _patternSelectedKeyframes)
+                {
+                    if (Mathf.Abs(selectedTime - keyTime) < 0.0001f)
+                        return true;
+                }
+                return false;
+            }
+            else
+            {
+                // Use time range selection
+                return keyTime >= _startJSON.valNoCallback && keyTime <= _endJSON.valNoCallback;
+            }
+        }
+
         private void InitChangeCurveUI()
         {
             _changeCurveJSON = new JSONStorableStringChooser("Change curve", CurveTypeValues.choicesList, "", "Change curve", ChangeCurve);
@@ -134,6 +248,10 @@ namespace VamTimeline
         private void SelectionModified()
         {
             var sb = new StringBuilder();
+            if (_usePatternSelection)
+            {
+                sb.AppendLine($"Pattern: every {_lastPatternInterval} frames, starting at #{_lastPatternOffset}");
+            }
             foreach (var target in animationEditContext.GetAllOrSelectedTargets())
             {
                 var involvedKeyframes = 0;
@@ -141,7 +259,7 @@ namespace VamTimeline
                 for (var key = 0; key < keyframes.Length; key++)
                 {
                     var keyTime = keyframes[key];
-                    if (keyTime >= _startJSON.valNoCallback && keyTime <= _endJSON.valNoCallback)
+                    if (IsKeyframeSelected(keyTime))
                         involvedKeyframes++;
                 }
                 if (involvedKeyframes > 0)
@@ -157,7 +275,9 @@ namespace VamTimeline
         public void CopyDeleteSelected(bool copy, bool delete)
         {
             plugin.animationEditContext.clipboard.Clear();
-            plugin.animationEditContext.clipboard.time = _startJSON.valNoCallback;
+            plugin.animationEditContext.clipboard.time = _usePatternSelection && _patternSelectedKeyframes.Count > 0
+                ? _patternSelectedKeyframes.Min()
+                : _startJSON.valNoCallback;
             foreach (var target in animationEditContext.GetAllOrSelectedTargets())
             {
                 target.StartBulkUpdates();
@@ -167,7 +287,7 @@ namespace VamTimeline
                     for (var key = keyframes.Length - 1; key >= 0; key--)
                     {
                         var keyTime = keyframes[key];
-                        if (keyTime < _startJSON.val || keyTime > _endJSON.val) continue;
+                        if (!IsKeyframeSelected(keyTime)) continue;
 
                         if (copy)
                         {
@@ -200,7 +320,7 @@ namespace VamTimeline
                     for (var key = 0; key < leadCurve.length; key++)
                     {
                         var keyTime = leadCurve.GetKeyframeByKey(key).time;
-                        if (keyTime >= _startJSON.valNoCallback && keyTime <= _endJSON.valNoCallback)
+                        if (IsKeyframeSelected(keyTime))
                         {
                             target.ChangeCurveByTime(keyTime, CurveTypeValues.ToInt(val));
                         }
@@ -225,10 +345,22 @@ namespace VamTimeline
 
         private void StartRecordOffset()
         {
-            if (current.clipTime < _startJSON.val || current.clipTime > _endJSON.val)
+            // Validate current time is within selection
+            if (_usePatternSelection)
             {
-                SuperController.LogError("Timeline: Cannot offset, current time is outside of the bounds of the selection");
-                return;
+                if (!IsKeyframeSelected(current.clipTime))
+                {
+                    SuperController.LogError("Timeline: Cannot offset, current time is not one of the pattern-selected keyframes");
+                    return;
+                }
+            }
+            else
+            {
+                if (current.clipTime < _startJSON.val || current.clipTime > _endJSON.val)
+                {
+                    SuperController.LogError("Timeline: Cannot offset, current time is outside of the bounds of the selection");
+                    return;
+                }
             }
 
             _offsetSnapshot = operations.Offset().Start(current.clipTime, animationEditContext.GetAllOrSelectedTargets().OfType<FreeControllerV3AnimationTarget>(), plugin.containingAtom.mainController, _offsetModeJSON.val);
@@ -250,7 +382,14 @@ namespace VamTimeline
                 return;
             }
 
-            operations.Offset().Apply(_offsetSnapshot, _startJSON.val, _endJSON.val, _offsetModeJSON.val);
+            if (_usePatternSelection)
+            {
+                operations.Offset().Apply(_offsetSnapshot, _patternSelectedKeyframes, _offsetModeJSON.val);
+            }
+            else
+            {
+                operations.Offset().Apply(_offsetSnapshot, _startJSON.val, _endJSON.val, _offsetModeJSON.val);
+            }
 
             animationEditContext.Sample();
         }
@@ -259,6 +398,9 @@ namespace VamTimeline
 
         public void OnTargetsSelectionChanged()
         {
+            UpdatePatternSelectionSliderRanges();
+            if (_usePatternSelection)
+                ApplyPatternSelection();
             SelectionModified();
         }
 
@@ -280,7 +422,27 @@ namespace VamTimeline
                 if (_startJSON.valNoCallback > _endJSON.valNoCallback) _startJSON.valNoCallback = _endJSON.valNoCallback;
             }
 
+            UpdatePatternSelectionSliderRanges();
+            if (_usePatternSelection)
+                ApplyPatternSelection();
             SelectionModified();
+        }
+
+        private void UpdatePatternSelectionSliderRanges()
+        {
+            var maxKeyframes = GetMaxKeyframeCount();
+            if (_patternIntervalJSON != null)
+            {
+                _patternIntervalJSON.max = Mathf.Max(2f, maxKeyframes - 1);
+                if (_patternIntervalJSON.val > _patternIntervalJSON.max)
+                    _patternIntervalJSON.valNoCallback = _patternIntervalJSON.max;
+            }
+            if (_patternOffsetJSON != null)
+            {
+                _patternOffsetJSON.max = Mathf.Max(0f, maxKeyframes - 1);
+                if (_patternOffsetJSON.val > _patternOffsetJSON.max)
+                    _patternOffsetJSON.valNoCallback = _patternOffsetJSON.max;
+            }
         }
 
         public override void OnDestroy()

@@ -21,6 +21,30 @@ namespace VamTimeline
 
         public void Apply(Snapshot offsetSnapshot, float from, float to, string offsetMode)
         {
+            ApplyInternal(offsetSnapshot, offsetMode, time =>
+            {
+                if (time < from - 0.0001f || time > to + 0.001f) return false;
+                if (Math.Abs(time - offsetSnapshot.clipboard.time) < 0.0001) return false;
+                return true;
+            });
+        }
+
+        public void Apply(Snapshot offsetSnapshot, HashSet<float> selectedKeyframeTimes, string offsetMode)
+        {
+            ApplyInternal(offsetSnapshot, offsetMode, time =>
+            {
+                if (Math.Abs(time - offsetSnapshot.clipboard.time) < 0.0001) return false;
+                foreach (var selectedTime in selectedKeyframeTimes)
+                {
+                    if (Math.Abs(selectedTime - time) < 0.0001f)
+                        return true;
+                }
+                return false;
+            });
+        }
+
+        private void ApplyInternal(Snapshot offsetSnapshot, string offsetMode, Func<float, bool> isKeyframeSelected)
+        {
             var useRepositionMode = offsetMode == RepositionMode;
             var pivot = Vector3.zero;
             var positionDelta = Vector3.zero;
@@ -69,8 +93,7 @@ namespace VamTimeline
                         {
                             // Do not double-apply already moved keyframe
                             var time = target.GetKeyframeTime(key);
-                            if (time < from - 0.0001f || time > to + 0.001f) continue;
-                            if (Math.Abs(time - offsetSnapshot.clipboard.time) < 0.0001) continue;
+                            if (!isKeyframeSelected(time)) continue;
                         }
 
                         var positionBefore = target.targetsPosition ? target.GetKeyframePosition(key) : control.position;
